@@ -3,8 +3,10 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
 from geocode import geocode_address
-from cache import get_jurisdiction, list_pending, list_verified, approve, delete_jurisdiction, demote
+from cache import get_jurisdiction, list_pending, list_verified, approve, delete_jurisdiction, demote, init_db
 from ai_research import research_jurisdiction
+
+init_db()
 
 app = FastAPI()
 
