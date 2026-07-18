@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>STR Checker</title>
+<style>
+  body { font-family: sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+  .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; }
+  .tabs button { padding: 0.5rem 1rem; border: 1px solid #ccc; background: #eee; cursor: pointer; }
+  .tabs button.active { background: #333; color: white; }
+  textarea { width: 100%; min-height: 120px; font-family: monospace; }
+  input[type=text] { width: 100%; padding: 0.4rem; margin-bottom: 0.5rem; }
+  button.run { padding: 0.6rem 1.2rem; margin-top: 0.5rem; cursor: pointer; }
+  .card { border: 1px solid #ccc; border-left: 5px solid #888; border-radius: 6px; padding: 1rem; margin: 1rem 0; }
+  .card.allowed { border-left-color: green; }
+  .card.not-allowed { border-left-color: #a33; }
+  .card.pending { border-left-color: goldenrod; }
+  .card.error { border-left-color: #a33; background: #fdd; }
+  .card.not-relevant { border-left-color: #a33; }
+  .badge { display: inline-block; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: #eee; margin-left: 0.5rem; }
+  .quote { font-style: italic; color: #555; font-size: 0.9rem; margin: 0.3rem 0; border-left: 2px solid #ddd; padding-left: 0.5rem; }
+  .section-hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>STR Checker</h1>
+
+<div class="tabs">
+  <button id="tabAgentBtn" class="active">Check Addresses</button>
+  <button id="tabReviewBtn">Review Pending</button>
+  <button id="tabVerifiedBtn">Verified</button>
+</div>
+
+<label>Backend URL</label>
+<input type="text" id="backendUrl" value="http://localhost:8000">
+
+<!-- AGENT VIEW -->
+<div id="agentView">
+  <label>Paste addresses (one per line), or a raw MLS listing dump</label>
+  <textarea id="addressInput" placeholder="181 W Water Street, Montello, WI 53949"></textarea>
+  <br>
+  <button class="run" id="runBtn">Run Check</button>
+  <p id="agentStatus"></p>
+  <div id="agentResults"></div>
+</div>
+
+<!-- REVIEW VIEW -->
+<div id="reviewView" class="section-hidden">
+  <button class="run" id="refreshPendingBtn">Refresh Pending List</button>
+  <p id="reviewStatus"></p>
+  <div id="reviewResults"></div>
+</div>
+
+<!-- VERIFIED VIEW -->
+<div id="verifiedView" class="section-hidden">
+  <button class="run" id="refreshVerifiedBtn">Refresh Verified List</button>
+  <p id="verifiedStatus"></p>
+  <div id="verifiedResults"></div>
+</div>
+
+<script>
+  const backendUrlInput = document.getElementById('backendUrl');
+
+  // ---------- TAB SWITCHING ----------
+  const tabAgentBtn = document.getElementById('tabAgentBtn');
+  const tabReviewBtn = document.getElementById('tabReviewBtn');
+  const tabVerifiedBtn = document.getElementById('tabVerifiedBtn');
+  const agentView = document.getElementById('agentView');
+  const reviewView = document.getElementById('reviewView');
+  const verifiedView = document.getElementById('verifiedView');
+
+  function hideAllViews() {
+    agentView.classList.add('section-hidden');
+    reviewView.classList.add('section-hidden');
+    verifiedView.classList.add('section-hidden');
+    tabAgentBtn.classList.remove('active');
+    tabReviewBtn.classList.remove('active');
+    tabVerifiedBtn.classList.remove('active');
+  }
+
+  tabAgentBtn.addEventListener('click', () => {
+    hideAllViews();
+    agentView.classList.remove('section-hidden');
+    tabAgentBtn.classList.add('active');
+  });
+
+  tabReviewBtn.addEventListener('click', () => {
+    hideAllViews();
+    reviewView.classList.remove('section-hidden');
+    tabReviewBtn.classList.add('active');
+    loadPending(); // auto-refresh whenever this tab is opened
+  });
+
+  tabVerifiedBtn.addEventListener('click', () => {
+    hideAllViews();
+    verifiedView.classList.remove('section-hidden');
+    tabVerifiedBtn.classList.add('active');
+    loadVerified();
+  });
+
+  // ---------- ADDRESS PARSING (mirrors parse_listings.py) ----------
+  const CITY_STATE_ZIP = /^[A-Za-z\s.'-]+,\s*WI\s+\d{5}(-\d{4})?$/;
+
+  function extractAddresses(rawText) {
+    const lines = rawText.split('\n').map(l => l.trim());
+    const found = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      if (CITY_STATE_ZIP.test(lines[i])) {
+        const street = lines[i - 1];
+        if (street) found.push(`${street}, ${lines[i]}`);
+      }
+    }
+
+    // if nothing matched the MLS-dump pattern, treat every non-empty line as its own address
+    if (found.length === 0) {
+      return lines.filter(l => l.length > 0);
+    }
+    return found;
+  }
+
+  // ---------- RENDER ONE RESULT CARD ----------
+  function renderResultCard(r) {
+    const div = document.createElement('div');
+
+    if (r.error) {
+      div.className = 'card error';
+      div.innerHTML = `<strong>${r.address}</strong><p>⚠ ${r.error}</p>`;
+      return div;
+    }
+
+    if (r.relevant === false) {
+      div.className = 'card not-relevant';
+      div.innerHTML = `
+        <strong>${r.address}</strong>
+        <span class="badge">${r.jurisdiction}</span>
+        <p>Confidence: <strong>${r.confidence}/10</strong></p>
+        <p>Nothing relevant found</p>
+      `;
+      return div;
+    }
+
+    const statusClass = r.status === 'pending' ? 'pending' : (r.str_allowed ? 'allowed' : 'not-allowed');
+    div.className = 'card ' + statusClass;
+
+    const quotesHtml = (r.source_quotes || []).map(q =>
+      `<div class="quote"><strong>${q.claim}:</strong> "${q.quote}"</div>`
+    ).join('');
+
+    const reqsHtml = (r.other_requirements || []).map(req => `<li>${req}</li>`).join('');
+
+    div.innerHTML = `
+      <strong>${r.address}</strong>
+      <span class="badge">${r.jurisdiction}</span>
+      <span class="badge">${r.status}</span>
+      <p>
+        STR allowed: <strong>${r.str_allowed === true ? 'Yes' : r.str_allowed === false ? 'No' : 'Unclear'}</strong> |
+        Permit required: <strong>${r.permit_required === true ? 'Yes' : r.permit_required === false ? 'No' : 'Unclear'}</strong> |
+        Confidence: <strong>${r.confidence}/10</strong>
+      </p>
+      ${r.fees ? `<p>Fees: ${r.fees}</p>` : ''}
+      ${reqsHtml ? `<ul>${reqsHtml}</ul>` : ''}
+      ${quotesHtml}
+      ${r.notes ? `<p><em>${r.notes}</em></p>` : ''}
+      <a href="${r.source_url}" target="_blank">View source</a>
+    `;
+    return div;
+  }
+
+  // ---------- AGENT VIEW: RUN CHECK ----------
+  document.getElementById('runBtn').addEventListener('click', async () => {
+    const raw = document.getElementById('addressInput').value.trim();
+    const statusEl = document.getElementById('agentStatus');
+    const resultsEl = document.getElementById('agentResults');
+    resultsEl.innerHTML = '';
+
+    if (!raw) {
+      statusEl.textContent = 'Paste at least one address first.';
+      return;
+    }
+
+    const addresses = extractAddresses(raw);
+    statusEl.textContent = `Checking ${addresses.length} address(es)... this can take a while for new jurisdictions.`;
+
+    try {
+      const resp = await fetch(`${backendUrlInput.value}/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ addresses })
+      });
+      const data = await resp.json();
+      statusEl.textContent = `Done — ${data.length} result(s).`;
+      data.forEach(r => resultsEl.appendChild(renderResultCard(r)));
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+    }
+  });
+
+  // ---------- REVIEW VIEW: LOAD + APPROVE ----------
+  async function loadPending() {
+    const statusEl = document.getElementById('reviewStatus');
+    const resultsEl = document.getElementById('reviewResults');
+    resultsEl.innerHTML = '';
+    statusEl.textContent = 'Loading...';
+
+    try {
+      const resp = await fetch(`${backendUrlInput.value}/pending`);
+      const data = await resp.json();
+      statusEl.textContent = `${data.length} pending jurisdiction(s).`;
+
+      data.forEach(entry => {
+        const card = renderResultCard({ ...entry, address: entry.name, jurisdiction: entry.name });
+        const approveBtn = document.createElement('button');
+        approveBtn.className = 'run';
+        approveBtn.textContent = 'Approve';
+        approveBtn.addEventListener('click', () => approveJurisdiction(entry.name));
+        card.appendChild(approveBtn);
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.className = 'run';
+        deleteBtn.textContent = 'X';
+        deleteBtn.style.background = '#a33';
+        deleteBtn.addEventListener('click', () => deleteJurisdiction(entry.name));
+        card.appendChild(deleteBtn);
+
+        resultsEl.appendChild(card);
+      });
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  async function approveJurisdiction(name) {
+    await fetch(`${backendUrlInput.value}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jurisdiction: name })
+    });
+    loadPending(); // refresh the list so the approved one disappears
+  }
+
+  async function deleteJurisdiction(name) {
+    await fetch(`${backendUrlInput.value}/delete_jurisdiction`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jurisdiction: name })
+    });
+    loadPending();
+  }
+
+  document.getElementById('refreshPendingBtn').addEventListener('click', loadPending);
+
+  // ---------- VERIFIED VIEW: LOAD ----------
+  async function loadVerified() {
+    const statusEl = document.getElementById('verifiedStatus');
+    const resultsEl = document.getElementById('verifiedResults');
+    resultsEl.innerHTML = '';
+    statusEl.textContent = 'Loading...';
+
+    try {
+      const resp = await fetch(`${backendUrlInput.value}/verified`);
+      const data = await resp.json();
+      statusEl.textContent = `${data.length} verified jurisdiction(s).`;
+
+      data.forEach(entry => {
+        const card = renderResultCard({ ...entry, address: entry.name, jurisdiction: entry.name });
+
+        const demoteBtn = document.createElement('button');
+        demoteBtn.className = 'run';
+        demoteBtn.textContent = 'X';
+        demoteBtn.style.background = '#a33';
+        demoteBtn.addEventListener('click', () => demoteJurisdiction(entry.name));
+        card.appendChild(demoteBtn);
+
+        resultsEl.appendChild(card);
+      });
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+    }
+  }
+
+  document.getElementById('refreshVerifiedBtn').addEventListener('click', loadVerified);
+
+  async function demoteJurisdiction(name) {
+    await fetch(`${backendUrlInput.value}/demote`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jurisdiction: name })
+    });
+    loadVerified();
+  }
+</script>
+
+</body>
+</html>
