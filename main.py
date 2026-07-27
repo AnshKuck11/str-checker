@@ -9,6 +9,8 @@ import asyncio
 import httpx
 import os
 
+SERPAPI_API_KEY = os.environ["SERPAPI_API_KEY"]
+
 analyze_lock = asyncio.Lock()
 
 init_db()
@@ -103,7 +105,7 @@ def search_usage():
     try:
         response = httpx.get(
             "https://serpapi.com/account",
-            params={"api_key": os.environ["SERPAPI_KEY"]},
+            params={"api_key": SERPAPI_API_KEY},
             timeout=10,
         )
         response.raise_for_status()
