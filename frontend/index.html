@@ -33,7 +33,10 @@
 </div>
 
 <label>Backend URL</label>
-<input type="text" id="backendUrl" value="https://str-checker.onrender.com">
+<input type="text" id="backendUrl" value="http://localhost:8000">
+
+<p id="searchUsage" style="font-size: 0.85rem; color: #666;">Searches remaining this month: loading...</p>
+
 
 <!-- AGENT VIEW -->
 <div id="agentView">
@@ -61,6 +64,24 @@
 
 <script>
   const backendUrlInput = document.getElementById('backendUrl');
+
+  async function loadSearchUsage() {
+    const usageEl = document.getElementById('searchUsage');
+    try {
+      const resp = await fetch(`${backendUrlInput.value}/search_usage`);
+      const data = await resp.json();
+      if (data.left === null || data.left === undefined) {
+        usageEl.textContent = 'Searches remaining this month: unavailable';
+      } else {
+        usageEl.textContent = `Searches remaining this month: ${data.left} / ${data.total}`;
+      }
+    } catch (err) {
+      usageEl.textContent = 'Searches remaining this month: unavailable';
+    }
+  }
+
+  loadSearchUsage(); // check it once when the page first loads
+
 
   // ---------- TAB SWITCHING ----------
   const tabAgentBtn = document.getElementById('tabAgentBtn');
@@ -192,6 +213,7 @@
       const data = await resp.json();
       statusEl.textContent = `Done — ${data.length} result(s).`;
       data.forEach(r => resultsEl.appendChild(renderResultCard(r)));
+      loadSearchUsage(); // refresh, since this run may have used some searches
     } catch (err) {
       statusEl.textContent = `Error: ${err.message}`;
     }

@@ -6,6 +6,8 @@ from geocode import geocode_address
 from cache import get_jurisdiction, list_pending, list_verified, approve, delete_jurisdiction, demote, init_db
 from ai_research import research_jurisdiction
 import asyncio
+import httpx
+import os
 
 analyze_lock = asyncio.Lock()
 
@@ -95,6 +97,25 @@ def delete_jurisdiction_route(req: ApproveRequest):
 def demote_route(req: ApproveRequest):
     demote(req.jurisdiction)
     return {"status": "ok"}
+
+@app.get("/search_usage")
+def search_usage():
+    try:
+        response = httpx.get(
+            "https://serpapi.com/account",
+            params={"api_key": os.environ["SERPAPI_KEY"]},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"[search_usage] failed: {e}")
+        return {"left": None, "total": None}
+
+    return {
+        "left": data.get("plan_searches_left"),
+        "total": data.get("searches_per_month"),
+    }
 
 
 if __name__ == "__main__":
